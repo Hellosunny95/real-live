@@ -25,9 +25,10 @@ class XiguaApi(private val cookieProvider: () -> String) {
         .build()
 
     suspend fun homeFeed(limit: Int = 30): List<VideoItem> = withContext(Dispatchers.IO) {
-        val queries = listOf("热门", "电影", "纪录片")
-        queries.flatMap { runCatching { searchSync(it) }.getOrDefault(emptyList()) }
-            .distinctBy { it.id }.take(limit)
+        listOf("热门", "电影", "纪录片")
+            .flatMap { runCatching { searchSync(it) }.getOrDefault(emptyList()) }
+            .distinctBy { it.id }
+            .take(limit)
     }
 
     suspend fun search(query: String, offset: Int = 0): List<VideoItem> = withContext(Dispatchers.IO) {
@@ -36,23 +37,24 @@ class XiguaApi(private val cookieProvider: () -> String) {
 
     suspend fun detail(video: VideoItem): VideoDetail = withContext(Dispatchers.IO) {
         val html = execute(video.pageUrl, "text/html,*/*", base)
-        val root = hydrated(html) ?: throw XiguaApiException("DETAIL", "未找到西瓜页面数据")
+        val root = hydrated(html)
+            ?: throw XiguaApiException("DETAIL", "未找到西瓜页面数据")
+
         val playbacks = LinkedHashMap<String, Playback>()
         walk(root) { obj ->
             val raw = first(obj, "main_url", "mainUrl", "play_url")
             if (raw.isNotBlank()) {
-                val ptk = first(obj, "ptk")
-                decodeUrl(raw, ptk)?.let { url ->
+                decodeUrl(raw, first(obj, "ptk"))?.let { url ->
                     if (url.startsWith("http")) {
-                        val h = long(obj, "vheight", "height").toInt()
-                        val label = first(obj, "definition", "quality", "gear_name").ifBlank {
-                            if (h > 0) "${h}P" else "自动"
-                        }
-                        playbacks[url] = Playback(url, label, height = h)
+                        val height = long(obj, "vheight", "height").toInt()
+                        val label = first(obj, "definition", "quality", "gear_name")
+                            .ifBlank { if (height > 0) "${height}P" else "自动" }
+                        playbacks[url] = Playback(url, label, height = height)
                     }
                 }
             }
         }
+
         val title = findString(root, "title", "videoTitle").ifBlank { video.title }
         val cover = findString(root, "poster_url", "cover_url", "image_url").ifBlank { video.coverUrl }
         val item = video.copy(title = title, coverUrl = normalize(cover))
@@ -70,8 +72,11 @@ class XiguaApi(private val cookieProvider: () -> String) {
     private fun searchSync(query: String, offset: Int = 0): List<VideoItem> {
         val q = query.trim()
         if (q.isBlank()) return emptyList()
-        val direct = Regex("(?:ixigua\\.com/)?(?:video/)?(\\d{15,22})").find(q)?.groupValues?.getOrNull(1)
+
+        val direct = Regex("(?:ixigua\\.com/)?(?:video/)?(\\d{15,22})")
+            .find(q)?.groupValues?.getOrNull(1)
         if (direct != null) return listOf(VideoItem(direct, "视频 $direct"))
+
         val encoded = URLEncoder.encode(q, "UTF-8").replace("+", "%20")
         val url = "$base/api/searchv2/complex/$encoded/$offset".toHttpUrl().newBuilder()
             .addQueryParameter("aid", "1768")
@@ -79,30 +84,45 @@ class XiguaApi(private val cookieProvider: () -> String) {
             .addQueryParameter("X-Bogus", "")
             .addQueryParameter("_signature", "")
             .build().toString()
-        val text = execute(url, "application/json,text/plain,*/*", "$base/search/$encoded/")
-        val root = JSONObject(text)
+
+        val root = JSONObject(execute(url, "application/json,text/plain,*/*", "$base/search/$encoded/"))
         val out = LinkedHashMap<String, VideoItem>()
         walk(root) { obj ->
             val id = listOf("group_id", "groupId", "item_id", "itemId", "video_id", "videoId")
-                .firstNotNullOfOrNull { key -> digits(obj.opt(key)) } ?: return@walk
+                .firstNotNullOfOrNull { key -> digits(obj.opt(key)) }
+                ?: return@walk
             if (out.containsKey(id)) return@walk
-            val title = findLocal(obj, "title", "video_title", "videoTitle").replace(Regex("<[^>]+>"), "").trim()
+
+            val title = findLocal(obj, "title", "video_title", "videoTitle")
+                .replace(Regex("<[^>]+>"), "")
+                .trim()
             if (title.length < 2) return@walk
-            val cover = findImage(obj)
-            val author = findLocal(obj, "author_name", "nickname", "user_name")
-            out[id] = VideoItem(id, title, cover, author)
+
+            out[id] = VideoItem(
+                id = id,
+                title = title,
+                coverUrl = findImage(obj),
+                author = findLocal(obj, "author_name", "nickname", "user_name")
+            )
         }
-        return out.values.filter { it.coverUrl.isNotBlank() }.take(40).ifEmpty { out.values.take(40) }
+        return out.values.filter { it.coverUrl.isNotBlank() }.take(40)
+            .ifEmpty { out.values.take(40) }
     }
 
     private fun execute(url: String, accept: String, referer: String): String {
-        val req = Request.Builder().url(url)
-            .header("User-Agent", ua).header("Accept", accept).header("Referer", referer)
-            .apply { cookieProvider().trim().takeIf { it.isNotEmpty() }?.let { header("Cookie", it) } }
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", ua)
+            .header("Accept", accept)
+            .header("Referer", referer)
+            .apply {
+                cookieProvider().trim().takeIf { it.isNotEmpty() }?.let { header("Cookie", it) }
+            }
             .build()
-        client.newCall(req).execute().use { r ->
-            val body = r.body?.string().orEmpty()
-            if (!r.isSuccessful) throw XiguaApiException("HTTP", "HTTP ${r.code}")
+
+        client.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw XiguaApiException("HTTP", "HTTP ${response.code}")
             if (body.isBlank()) throw XiguaApiException("EMPTY", "接口返回空内容")
             return body
         }
@@ -110,52 +130,133 @@ class XiguaApi(private val cookieProvider: () -> String) {
 
     private fun hydrated(html: String): JSONObject? {
         val marker = "window._SSR_HYDRATED_DATA"
-        val m = html.indexOf(marker); if (m < 0) return null
-        val start = html.indexOf('{', html.indexOf('=', m)); if (start < 0) return null
-        var depth = 0; var quoted = false; var esc = false
+        val markerPos = html.indexOf(marker)
+        if (markerPos < 0) return null
+        val equalsPos = html.indexOf('=', markerPos)
+        val start = html.indexOf('{', equalsPos)
+        if (start < 0) return null
+
+        var depth = 0
+        var quoted = false
+        var escaped = false
         for (i in start until html.length) {
             val c = html[i]
-            if (quoted) { if (esc) esc = false else if (c == '\\') esc = true else if (c == '"') quoted = false; continue }
-            if (c == '"') quoted = true else if (c == '{') depth++ else if (c == '}') {
-                depth--; if (depth == 0) return runCatching { JSONObject(html.substring(start, i + 1).replace(Regex("\\bundefined\\b"), "null")) }.getOrNull()
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') quoted = false
+                continue
+            }
+            when (c) {
+                '"' -> quoted = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) {
+                        val json = html.substring(start, i + 1)
+                            .replace(Regex("\\bundefined\\b"), "null")
+                        return runCatching { JSONObject(json) }.getOrNull()
+                    }
+                }
             }
         }
         return null
     }
 
-    private fun walk(v: Any?, visit: (JSONObject) -> Unit) {
-        when (v) {
-            is JSONObject -> { visit(v); v.keys().forEach { walk(v.opt(it), visit) } }
-            is JSONArray -> for (i in 0 until v.length()) walk(v.opt(i), visit)
+    private fun walk(value: Any?, visit: (JSONObject) -> Unit) {
+        when (value) {
+            is JSONObject -> {
+                visit(value)
+                val keys = value.keys()
+                while (keys.hasNext()) walk(value.opt(keys.next()), visit)
+            }
+            is JSONArray -> for (i in 0 until value.length()) walk(value.opt(i), visit)
         }
     }
 
-    private fun digits(v: Any?): String? {
-        val s = when (v) { is Number -> v.toLong().toString(); is String -> v.filter(Char::isDigit); else -> "" }
+    private fun digits(value: Any?): String? {
+        val s = when (value) {
+            is Number -> value.toLong().toString()
+            is String -> value.filter(Char::isDigit)
+            else -> ""
+        }
         return s.takeIf { it.length in 15..22 }
     }
-    private fun first(o: JSONObject, vararg keys: String): String = keys.firstNotNullOfOrNull { k -> o.optString(k).takeIf { it.isNotBlank() } } ?: ""
-    private fun long(o: JSONObject, vararg keys: String): Long = keys.firstNotNullOfOrNull { k -> o.opt(k)?.toString()?.toLongOrNull() } ?: 0
-    private fun findLocal(o: JSONObject, vararg keys: String): String = first(o, *keys)
-    private fun findString(root: Any?, vararg keys: String): String { var result = ""; walk(root) { if (result.isBlank()) result = first(it, *keys) }; return result }
-    private fun findImage(o: JSONObject): String {
-        for (k in listOf("large_image_url", "image_url", "poster_url", "cover_url", "coverUrl")) normalize(o.optString(k)).takeIf { it.isNotBlank() }?.let { return it }
-        walk(o) { child -> if (child !== o) normalize(first(child, "url", "image_url")).takeIf { it.isNotBlank() }?.let { return it } }
+
+    private fun first(obj: JSONObject, vararg keys: String): String =
+        keys.firstNotNullOfOrNull { key -> obj.optString(key).takeIf { it.isNotBlank() } } ?: ""
+
+    private fun long(obj: JSONObject, vararg keys: String): Long =
+        keys.firstNotNullOfOrNull { key -> obj.opt(key)?.toString()?.toLongOrNull() } ?: 0
+
+    private fun findLocal(obj: JSONObject, vararg keys: String): String = first(obj, *keys)
+
+    private fun findString(root: Any?, vararg keys: String): String {
+        var result = ""
+        walk(root) { if (result.isBlank()) result = first(it, *keys) }
+        return result
+    }
+
+    private fun findImage(obj: JSONObject): String {
+        for (key in listOf("large_image_url", "image_url", "poster_url", "cover_url", "coverUrl")) {
+            val candidate = normalize(obj.optString(key))
+            if (candidate.isNotBlank()) return candidate
+        }
+        return findNestedImage(obj)
+    }
+
+    private fun findNestedImage(value: Any?): String {
+        when (value) {
+            is JSONObject -> {
+                val direct = normalize(first(value, "url", "image_url"))
+                if (direct.startsWith("http")) return direct
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val found = findNestedImage(value.opt(keys.next()))
+                    if (found.isNotBlank()) return found
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until value.length()) {
+                    val found = findNestedImage(value.opt(i))
+                    if (found.isNotBlank()) return found
+                }
+            }
+        }
         return ""
     }
-    private fun normalize(raw: String): String = raw.trim().replace("\\u002F", "/").let { if (it.startsWith("//")) "https:$it" else it }
+
+    private fun normalize(raw: String): String = raw.trim()
+        .replace("\\u002F", "/")
+        .let { if (it.startsWith("//")) "https:$it" else it }
 
     private fun decodeUrl(raw: String, ptk: String): String? {
-        val v = normalize(raw); if (v.startsWith("http")) return v
-        if (ptk.toByteArray(StandardCharsets.UTF_8).size in setOf(16, 24, 32)) runCatching {
-            val key = ptk.toByteArray(StandardCharsets.UTF_8)
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(key.copyOfRange(0, 16)))
-            val stage = String(cipher.doFinal(Base64.decode(v, Base64.DEFAULT)), StandardCharsets.UTF_8).trim()
-            return runCatching { String(Base64.decode(stage, Base64.DEFAULT), StandardCharsets.UTF_8).trim() }.getOrDefault(stage)
+        val value = normalize(raw)
+        if (value.startsWith("http")) return value
+
+        val key = ptk.toByteArray(StandardCharsets.UTF_8)
+        if (key.size in setOf(16, 24, 32)) {
+            val decrypted = runCatching {
+                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                cipher.init(
+                    Cipher.DECRYPT_MODE,
+                    SecretKeySpec(key, "AES"),
+                    IvParameterSpec(key.copyOfRange(0, 16))
+                )
+                String(cipher.doFinal(Base64.decode(value, Base64.DEFAULT)), StandardCharsets.UTF_8).trim()
+            }.getOrNull()
+            if (!decrypted.isNullOrBlank()) {
+                return runCatching {
+                    String(Base64.decode(decrypted, Base64.DEFAULT), StandardCharsets.UTF_8).trim()
+                }.getOrDefault(decrypted)
+            }
         }
-        return runCatching { String(Base64.decode(v, Base64.DEFAULT), StandardCharsets.UTF_8).trim() }.getOrNull()
+
+        return runCatching {
+            String(Base64.decode(value, Base64.DEFAULT), StandardCharsets.UTF_8).trim()
+        }.getOrNull()
     }
 }
 
-class XiguaApiException(val code: String, message: String) : IllegalStateException("[$code] $message")
+class XiguaApiException(val code: String, message: String) :
+    IllegalStateException("[$code] $message")
