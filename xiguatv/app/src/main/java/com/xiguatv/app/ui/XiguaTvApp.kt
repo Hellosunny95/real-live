@@ -71,14 +71,25 @@ private fun HomeScreen(
     var sections by remember { mutableStateOf<List<VideoSection>>(emptyList()) }
     var selected by remember { mutableStateOf<VideoItem?>(null) }
     var error by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(true) }
+    var reloadKey by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    var diagnostic by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(reloadKey) {
+        loading = true
+        error = ""
+        diagnostic = ""
+        sections = emptyList()
+        selected = null
         runCatching { repository.home() }
             .onSuccess {
                 sections = it
                 selected = it.firstOrNull()?.items?.firstOrNull()
+                if (it.isEmpty()) error = "西瓜接口返回了空首页"
             }
-            .onFailure { error = it.message.orEmpty() }
+            .onFailure { error = it.message ?: "首页加载失败" }
+        loading = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -93,14 +104,14 @@ private fun HomeScreen(
         Box(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(
-                    listOf(Color(0xEE080A0E), Color(0xAA080A0E), Color(0x55080A0E))
+                    listOf(Color(0xF2080A0E), Color(0xC0080A0E), Color(0x88080A0E), Color(0x33080A0E))
                 )
             )
         )
 
         Column(Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 28.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("西瓜 TV", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Text("西瓜 TV", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(32.dp))
                 TvButton("首页") {}
                 Spacer(Modifier.width(12.dp))
@@ -111,27 +122,72 @@ private fun HomeScreen(
 
             Spacer(Modifier.height(34.dp))
             selected?.let {
-                Text(it.title, fontSize = 38.sp, fontWeight = FontWeight.Bold, maxLines = 2)
+                Text(it.title, color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold, maxLines = 2)
                 if (it.author.isNotBlank()) {
                     Text(it.author, color = Color.LightGray, fontSize = 18.sp)
                 }
+                Spacer(Modifier.height(26.dp))
             }
-            Spacer(Modifier.height(26.dp))
 
-            if (sections.isEmpty()) {
-                if (error.isBlank()) CircularProgressIndicator() else Text("加载失败：$error")
-            } else {
-                sections.forEach { section ->
-                    Text(section.title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(8.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                        items(section.items, key = { it.id }) { item ->
-                            VideoCard(item, onFocus = { selected = item }) {
-                                open(Screen.Detail(item))
-                            }
+            when {
+                loading -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(42.dp))
+                        Spacer(Modifier.width(18.dp))
+                        Column {
+                            Text("正在连接西瓜视频…", color = Color.White, fontSize = 22.sp)
+                            Text("最多等待 12 秒，不会再无限转圈", color = Color.Gray, fontSize = 16.sp)
                         }
                     }
-                    Spacer(Modifier.height(20.dp))
+                }
+
+                sections.isNotEmpty() -> {
+                    sections.forEach { section ->
+                        Text(section.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(section.items, key = { it.id }) { item ->
+                                VideoCard(item, onFocus = { selected = item }) {
+                                    open(Screen.Detail(item))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(20.dp))
+                    }
+                }
+
+                else -> {
+                    Column(Modifier.widthIn(max = 900.dp)) {
+                        Text("首页数据没有加载出来", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            error.ifBlank { "西瓜当前接口没有返回可解析内容。" },
+                            color = Color(0xFFFFB4AB),
+                            fontSize = 18.sp
+                        )
+                        Spacer(Modifier.height(22.dp))
+                        Row {
+                            TvButton("重新加载") { reloadKey++ }
+                            Spacer(Modifier.width(14.dp))
+                            TvButton("去搜索", search)
+                            Spacer(Modifier.width(14.dp))
+                            TvButton("设置 Cookie", settings)
+                            Spacer(Modifier.width(14.dp))
+                            TvButton("接口自检") {
+                                scope.launch {
+                                    diagnostic = "检测中…"
+                                    diagnostic = runCatching { repository.diagnose().message }
+                                        .getOrElse { it.message ?: "自检失败" }
+                                }
+                            }
+                        }
+                        if (diagnostic.isNotBlank()) {
+                            Spacer(Modifier.height(18.dp))
+                            Text("接口状态：$diagnostic", color = Color.LightGray, fontSize = 17.sp)
+                        }
+                        Spacer(Modifier.height(30.dp))
+                        Text("你仍然可以直接进入“搜索”测试关键词或西瓜视频 ID。", color = Color.Gray, fontSize = 16.sp)
+                    }
                 }
             }
         }
@@ -156,12 +212,11 @@ private fun VideoCard(item: VideoItem, onFocus: () -> Unit, click: () -> Unit) {
                 ) {
                     click()
                     true
-                } else {
-                    false
-                }
+                } else false
             }
             .border(if (focused) 3.dp else 0.dp, Color.White, RoundedCornerShape(10.dp))
             .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xB316191F))
             .clickable(onClick = click)
             .focusable()
     ) {
@@ -171,7 +226,7 @@ private fun VideoCard(item: VideoItem, onFocus: () -> Unit, click: () -> Unit) {
             modifier = Modifier.fillMaxWidth().height(124.dp),
             contentScale = ContentScale.Crop
         )
-        Text(item.title, modifier = Modifier.padding(8.dp), maxLines = 2, fontSize = 15.sp)
+        Text(item.title, color = Color.White, modifier = Modifier.padding(8.dp), maxLines = 2, fontSize = 15.sp)
     }
 }
 
@@ -184,13 +239,14 @@ private fun SearchScreen(
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var status by remember { mutableStateOf("") }
+    var searching by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().padding(48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TvButton("返回", back)
             Spacer(Modifier.width(18.dp))
-            Text("搜索", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text("搜索", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(24.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -202,20 +258,22 @@ private fun SearchScreen(
                 singleLine = true
             )
             Spacer(Modifier.width(16.dp))
-            TvButton("搜索") {
-                scope.launch {
-                    status = "搜索中..."
+            TvButton(if (searching) "搜索中…" else "搜索") {
+                if (!searching) scope.launch {
+                    searching = true
+                    status = "正在请求西瓜搜索接口…"
                     runCatching { repository.search(query) }
                         .onSuccess {
                             results = it
-                            status = "${it.size} 条结果"
+                            status = if (it.isEmpty()) "接口返回成功，但没有解析到结果" else "${it.size} 条结果"
                         }
-                        .onFailure { status = it.message.orEmpty() }
+                        .onFailure { status = "搜索失败：${it.message ?: "未知错误"}" }
+                    searching = false
                 }
             }
         }
         Spacer(Modifier.height(14.dp))
-        Text(status, color = Color.LightGray)
+        Text(status, color = if (status.startsWith("搜索失败")) Color(0xFFFFB4AB) else Color.LightGray)
         Spacer(Modifier.height(18.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             items(results, key = { it.id }) { VideoCard(it, {}) { open(it) } }
@@ -232,11 +290,14 @@ private fun DetailScreen(
 ) {
     var detail by remember { mutableStateOf<VideoDetail?>(null) }
     var error by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(seed.id) {
+        loading = true
         runCatching { repository.detail(seed) }
             .onSuccess { detail = it }
-            .onFailure { error = it.message.orEmpty() }
+            .onFailure { error = it.message ?: "详情解析失败" }
+        loading = false
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -257,24 +318,24 @@ private fun DetailScreen(
             Modifier.fillMaxHeight().width(760.dp).padding(48.dp),
             verticalArrangement = Arrangement.Center
         ) {
-            Text(detail?.item?.title ?: seed.title, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+            Text(detail?.item?.title ?: seed.title, color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(14.dp))
-            Text(
-                detail?.item?.description ?: seed.description,
-                color = Color.LightGray,
-                maxLines = 5
-            )
+            Text(detail?.item?.description ?: seed.description, color = Color.LightGray, maxLines = 5)
             Spacer(Modifier.height(24.dp))
             Row {
                 TvButton("返回", back)
                 Spacer(Modifier.width(14.dp))
                 TvButton("播放") { detail?.let(play) }
             }
-            if (detail == null && error.isBlank()) {
+            if (loading) {
                 Spacer(Modifier.height(18.dp))
-                CircularProgressIndicator()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(34.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Text("解析详情与播放地址…", color = Color.LightGray)
+                }
             }
-            if (error.isNotBlank()) {
+            if (!loading && error.isNotBlank()) {
                 Spacer(Modifier.height(18.dp))
                 Text("详情解析失败：$error", color = Color(0xFFFF8A80))
             }
@@ -293,7 +354,7 @@ private fun PlayerScreen(detail: VideoDetail, back: () -> Unit) {
     if (playback == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("没有可播放地址")
+                Text("没有可播放地址", color = Color.White)
                 Spacer(Modifier.height(16.dp))
                 TvButton("返回", back)
             }
@@ -361,10 +422,10 @@ private fun SettingsScreen(
         Row {
             TvButton("返回", back)
             Spacer(Modifier.width(18.dp))
-            Text("设置", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text("设置", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(28.dp))
-        Text("西瓜 Cookie（可选）")
+        Text("西瓜 Cookie（可选）", color = Color.White)
         TextField(
             value = cookie,
             onValueChange = { cookie = it },
@@ -380,13 +441,14 @@ private fun SettingsScreen(
             Spacer(Modifier.width(14.dp))
             TvButton("接口自检") {
                 scope.launch {
-                    status = "检测中..."
-                    status = repository.diagnose().message
+                    status = "检测中…"
+                    status = runCatching { repository.diagnose().message }
+                        .getOrElse { "自检失败：${it.message}" }
                 }
             }
         }
         Spacer(Modifier.height(18.dp))
-        Text(status)
+        Text(status, color = Color.LightGray)
     }
 }
 
