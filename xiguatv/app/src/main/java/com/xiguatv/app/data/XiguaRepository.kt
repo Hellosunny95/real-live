@@ -1,26 +1,44 @@
 package com.xiguatv.app.data
 
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeout
 
 class XiguaRepository(cookieProvider: () -> String) {
     private val api = XiguaApi(cookieProvider)
 
-    suspend fun home(): List<VideoSection> = coroutineScope {
-        val recommended = async { runCatching { api.homeFeed(36) }.getOrDefault(emptyList()) }
-        val categories = listOf("电影", "纪录片", "知识").map { query ->
-            query to async { runCatching { api.search(query) }.getOrDefault(emptyList()) }
-        }
+    suspend fun home(): List<VideoSection> = withTimeout(12_000) {
+        supervisorScope {
+            val requests = listOf(
+                "推荐" to async { runCatching { api.homeFeed(28) }.getOrDefault(emptyList()) },
+                "电影" to async { runCatching { api.search("电影") }.getOrDefault(emptyList()) },
+                "纪录片" to async { runCatching { api.search("纪录片") }.getOrDefault(emptyList()) },
+                "知识" to async { runCatching { api.search("知识") }.getOrDefault(emptyList()) }
+            )
 
-        buildList {
-            recommended.await().takeIf { it.isNotEmpty() }?.let { add(VideoSection("推荐", it)) }
-            categories.forEach { (title, request) ->
-                request.await().takeIf { it.isNotEmpty() }?.let { add(VideoSection(title, it)) }
+            val sections = requests.mapNotNull { (title, request) ->
+                request.await().takeIf { it.isNotEmpty() }?.let { VideoSection(title, it) }
             }
+
+            if (sections.isEmpty()) {
+                throw XiguaApiException(
+                    "HOME_EMPTY",
+                    "西瓜接口没有返回首页数据。请重试，或先进入搜索/设置里的接口自检。"
+                )
+            }
+            sections
         }
     }
 
-    suspend fun search(query: String): List<VideoItem> = api.search(query)
-    suspend fun detail(video: VideoItem): VideoDetail = api.detail(video)
-    suspend fun diagnose(): ApiDiagnostic = api.diagnose()
+    suspend fun search(query: String): List<VideoItem> = withTimeout(12_000) {
+        api.search(query)
+    }
+
+    suspend fun detail(video: VideoItem): VideoDetail = withTimeout(15_000) {
+        api.detail(video)
+    }
+
+    suspend fun diagnose(): ApiDiagnostic = withTimeout(12_000) {
+        api.diagnose()
+    }
 }
