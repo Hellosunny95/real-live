@@ -18,10 +18,13 @@ import javax.crypto.spec.SecretKeySpec
 
 class XiguaApi(private val cookieProvider: () -> String) {
     private val base = "https://www.ixigua.com"
-    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
+    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
     private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(22, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     suspend fun homeFeed(limit: Int = 30): List<VideoItem> = withContext(Dispatchers.IO) {
@@ -36,7 +39,7 @@ class XiguaApi(private val cookieProvider: () -> String) {
     }
 
     suspend fun detail(video: VideoItem): VideoDetail = withContext(Dispatchers.IO) {
-        val html = execute(video.pageUrl, "text/html,*/*", base)
+        val html = execute(video.pageUrl, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", base)
         val root = hydrated(html)
             ?: throw XiguaApiException("DETAIL", "未找到西瓜页面数据")
 
@@ -65,7 +68,8 @@ class XiguaApi(private val cookieProvider: () -> String) {
     suspend fun diagnose(): ApiDiagnostic = withContext(Dispatchers.IO) {
         runCatching {
             val items = searchSync("纪录片")
-            ApiDiagnostic(items.isNotEmpty(), "搜索接口正常，返回 ${items.size} 条", items.size)
+            if (items.isEmpty()) ApiDiagnostic(false, "搜索接口可访问，但没有解析到结果")
+            else ApiDiagnostic(true, "搜索接口正常，返回 ${items.size} 条", items.size)
         }.getOrElse { ApiDiagnostic(false, it.message ?: "接口错误") }
     }
 
@@ -115,6 +119,8 @@ class XiguaApi(private val cookieProvider: () -> String) {
             .header("User-Agent", ua)
             .header("Accept", accept)
             .header("Referer", referer)
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
+            .header("Cache-Control", "no-cache")
             .apply {
                 cookieProvider().trim().takeIf { it.isNotEmpty() }?.let { header("Cookie", it) }
             }
