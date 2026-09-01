@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [ xiguatv-build-ci ]
+  pull_request:
+    branches: [ dev ]
 
 jobs:
   build:
