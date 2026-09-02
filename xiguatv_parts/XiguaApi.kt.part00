@@ -1,0 +1,148 @@
+package com.xiguatv.app.data
+
+import android.util.Base64
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.LinkedHashMap
+import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+/**
+ * Xigua web adapter.
+ *
+ * All reverse-engineered web details deliberately live in this file so platform changes do not
+ * leak into the UI layer. The implementation is independent Kotlin code, based on observable web
+ * behavior and the public XiguaApis research project.
+ */
+class XiguaApi(private val cookieProvider: () -> String) {
+    private val baseUrl = "https://www.ixigua.com"
+    private val desktopUa =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(22, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    /**
+     * Best-effort home recommendation fetch.
+     *
+     * The web home page has historically exposed feed data in SSR. When that structure is not
+     * present, /api/feedv2 is tried. The repository still has a search-based fallback on top.
+     */
+    suspend fun homeFeed(limit: Int = 30): List<VideoItem> = withContext(Dispatchers.IO) {
+        val fromSsr = runCatching {
+            val html = executeHtml("$baseUrl/", referer = baseUrl)
+            extractHydratedData(html)?.let { parseVideoItems(it, limit) }.orEmpty()
+        }.getOrDefault(emptyList())
+        if (fromSsr.size >= 5) return@withContext fromSsr.take(limit)
+
+        val fromFeed = runCatching {
+            val url = "$baseUrl/api/feedv2".toHttpUrl().newBuilder()
+                .addQueryParameter("aid", "1768")
+                .build().toString()
+            parseVideoItems(JSONObject(executeJson(url, referer = "$baseUrl/")), limit)
+        }.getOrDefault(emptyList())
+
+        (fromSsr + fromFeed).distinctBy { it.id }.take(limit)
+    }
+
+    suspend fun search(query: String, offset: Int = 0): List<VideoItem> = withContext(Dispatchers.IO) {
+        val clean = query.trim()
+        if (clean.isBlank()) return@withContext emptyList()
+
+        val directId = extractVideoId(clean)
+        if (directId != null) {
+            return@withContext listOf(VideoItem(id = directId, title = "视频 $directId"))
+        }
+
+        val encodedPath = URLEncoder.encode(clean, "UTF-8").replace("+", "%20")
+        val url = "$baseUrl/api/searchv2/complex/$encodedPath/$offset".toHttpUrl().newBuilder()
+            .addQueryParameter("search_id", "")
+            .addQueryParameter("fss", "default_search")
+            .addQueryParameter("aid", "1768")
+            .addQueryParameter("msToken", "")
+            .addQueryParameter("X-Bogus", "")
+            .addQueryParameter("_signature", "")
+            .build()
+        val body = executeJson(url.toString(), referer = "$baseUrl/search/$encodedPath/")
+        parseSearch(body)
+    }
+
+    suspend fun detail(video: VideoItem): VideoDetail = withContext(Dispatchers.IO) {
+        val url = video.pageUrl.toHttpUrl().newBuilder()
+            .addQueryParameter("logTag", "tv")
+            .build().toString()
+        val html = executeHtml(url, referer = baseUrl)
+        val hydrated = extractHydratedData(html)
+            ?: throw XiguaApiException("DETAIL_SSR_MISSING", "页面没有 _SSR_HYDRATED_DATA，西瓜网页结构可能已变化")
+        parseDetail(video, hydrated)
+    }
+
+    suspend fun diagnose(): ApiDiagnostic = withContext(Dispatchers.IO) {
+        runCatching {
+            val searchItems = search("纪录片")
+            if (searchItems.isEmpty()) {
+                return@runCatching ApiDiagnostic(false, "搜索接口返回 0 条数据", searchCount = 0)
+            }
+            val first = searchItems.first()
+            val detail = detail(first)
+            ApiDiagnostic(
+                ok = detail.alternatives.isNotEmpty(),
+                message = if (detail.alternatives.isNotEmpty()) {
+                    "搜索、详情、播放地址解析均正常"
+                } else {
+                    "搜索和详情正常，但没有解析到播放地址"
+                },
+                searchCount = searchItems.size,
+                detailParsed = true,
+                playbackCount = detail.alternatives.size
+            )
+        }.getOrElse {
+            ApiDiagnostic(false, it.message ?: it.javaClass.simpleName)
+        }
+    }
+
+    private fun executeJson(url: String, referer: String): String = execute(
+        url = url,
+        referer = referer,
+        accept = "application/json, text/plain, */*"
+    )
+
+    private fun executeHtml(url: String, referer: String): String = execute(
+        url = url,
+        referer = referer,
+        accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    )
+
+    private fun execute(url: String, referer: String, accept: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", accept)
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
+            .header("Cache-Control", "no-cache")
+            .header("Pragma", "no-cache")
+            .header("User-Agent", desktopUa)
+            .header("Referer", referer)
+            .header("Sec-CH-UA", "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"126\", \"Microsoft Edge\";v=\"126\"")
+            .header("Sec-CH-UA-Mobile", "?0")
+            .header("Sec-CH-UA-Platform", "\"Windows\"")
+            .apply {
+                cookieProvider().trim().takeIf { it.isNotEmpty() }?.let { header("Cookie", it) }
+            }
+            .build()
+
+        client.newCall(request).execut

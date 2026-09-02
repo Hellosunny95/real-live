@@ -1,0 +1,65 @@
+name: Build XiguaTV APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ xiguatv-build-ci ]
+  pull_request:
+    branches: [ dev ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe Xigua search endpoint
+        shell: bash
+        run: |
+          set +e
+          URL='https://www.ixigua.com/api/searchv2/complex/%E7%BA%AA%E5%BD%95%E7%89%87/0?search_id=&fss=default_search&aid=1768&msToken=&X-Bogus=&_signature='
+          curl -L --max-time 15 -sS -D /tmp/xigua_headers.txt -o /tmp/xigua_body.txt \
+            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0' \
+            -H 'Accept: application/json, text/plain, */*' \
+            -H 'Accept-Language: zh-CN,zh;q=0.9,en;q=0.8' \
+            -H 'Referer: https://www.ixigua.com/search/%E7%BA%AA%E5%BD%95%E7%89%87/?fss=default_search' \
+            -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin' \
+            "$URL"
+          echo '===== XIGUA HEADERS ====='
+          cat /tmp/xigua_headers.txt || true
+          echo '===== XIGUA BODY FIRST 4000 BYTES ====='
+          head -c 4000 /tmp/xigua_body.txt || true
+          echo
+          echo '===== BODY SIZE ====='
+          wc -c /tmp/xigua_body.txt || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: xiguatv
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Rename APK
+        run: cp xiguatv/app/build/outputs/apk/debug/app-debug.apk XiguaTV-v0.4-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: XiguaTV-v0.4-debug
+          path: XiguaTV-v0.4-debug.apk
+          if-no-files-found: error
